@@ -1,110 +1,149 @@
+
 'use client';
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import type { TypeBadge } from '@/lib/types';
 
-/**
- * Custom hook to automatically collect and track type badges from video results
- *
- * Features:
- * - Auto-collects unique type_name values
- * - Normalizes similar type names (e.g., "动作片" and "动作" merge)
- * - Tracks count per type
- * - Updates dynamically as videos are added/removed
- * - Removes badges when count reaches 0
- * - Supports filtering by selected types
- */
+export const VIDEO_CATEGORIES = [
+  '电视剧',
+  '电影',
+  '动漫',
+  '综艺',
+  '短剧',
+] as const;
 
-// Normalize type names to merge near-duplicates
-function normalizeTypeName(type: string): string {
-  // Collapse whitespace and trim
-  let t = type.replace(/\s+/g, '').trim();
-  // Apply NFC unicode normalization
-  t = t.normalize('NFC');
-  // Remove trailing 片/剧/类 suffix for grouping (e.g., "动作片" → "动作", "喜剧片" → "喜剧")
-  // But keep standalone names like "电影", "电视剧" etc.
-  if (t.length > 2 && (t.endsWith('片') || t.endsWith('剧') || t.endsWith('类'))) {
-    t = t.slice(0, -1);
-  }
-  // Lowercase for English name normalization (e.g., "Action" vs "action")
-  t = t.toLowerCase();
-  return t;
+export const DEFAULT_FILTERS = {
+  category: '全部分类',
+  region: '全部地区',
+  language: '全部语言',
+  year: '全部年份',
+} as const;
+
+export interface VideoFilters {
+  category: string;
+  region: string;
+  language: string;
+  year: string;
 }
 
-export function useTypeBadges<T extends { type_name?: string }>(videos: T[]) {
+type FilterableVideo = {
+  type_name?: string;
+  vod_type?: string;
+  category?: string;
+  region?: string;
+  area?: string;
+  language?: string;
+  lang?: string;
+  year?: string | number;
+  vod_year?: string | number;
+};
+
+function normalizeTypeName(type: string): string {
+  return type.replace(/\s+/g, '').trim().normalize('NFC').toLowerCase();
+}
+
+function getCategory(video: FilterableVideo): string {
+  return video.category?.trim() || video.vod_type?.trim() || video.type_name?.trim() || '';
+}
+
+function matches(value: string | number | undefined, selected: string): boolean {
+  return selected.startsWith('全部') ||
+    String(value ?? '').trim() === selected;
+}
+
+export function useTypeBadges<T extends FilterableVideo>(videos: T[]) {
   const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set());
 
-  // Collect and count type badges from videos
+  const [filters, setFilters] = useState<VideoFilters>({
+    ...DEFAULT_FILTERS,
+  });
+
+  // 固定的视频分类
   const typeBadges = useMemo<TypeBadge[]>(() => {
-    const typeMap = new Map<string, { display: string; count: number }>();
+    const counts = new Map<string, number>();
 
     videos.forEach(video => {
-      if (video.type_name && video.type_name.trim()) {
-        const raw = video.type_name.trim();
-        const normalized = normalizeTypeName(raw);
-        const existing = typeMap.get(normalized);
-        if (existing) {
-          existing.count++;
-          // Prefer shorter display name (e.g., "动作" over "动作片")
-          if (raw.length < existing.display.length) {
-            existing.display = raw;
-          }
-        } else {
-          typeMap.set(normalized, { display: raw, count: 1 });
-        }
-      }
+      const category = getCategory(video);
+      if (!category) return;
+
+      const key = normalizeTypeName(category);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
     });
 
-    // Convert to array and sort by count (descending)
-    return Array.from(typeMap.entries())
-      .map(([, val]) => ({ type: val.display, count: val.count }))
-      .sort((a, b) => b.count - a.count);
+    return VIDEO_CATEGORIES.map(category => ({
+      type: category,
+      count: counts.get(normalizeTypeName(category)) ?? 0,
+    })) as TypeBadge[];
   }, [videos]);
 
-  // Filter videos by selected types
-  const filteredVideos = useMemo(() => {
-    if (selectedTypes.size === 0) {
-      return videos;
-    }
+  // 从视频数据自动收集地区、语言、年份选项
+  const filterOptions = useMemo(() => {
+    const unique = (values: (string | number | undefined)[]) =>
+      Array.from(
+        new Set(values.map(v => String(v ?? '').trim()).filter(Boolean))
+      ).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
 
-    // Build a set of normalized selected types
+    return {
+      categories: ['全部分类', ...VIDEO_CATEGORIES],
+      regions: ['全部地区', ...unique(videos.map(v => v.region || v.area))],
+      languages: ['全部语言', ...unique(videos.map(v => v.language || v.lang))],
+      years: ['全部年份', ...unique(videos.map(v => v.year || v.vod_year))],
+    };
+  }, [videos]);
+
+  const filteredVideos = useMemo(() => {
     const normalizedSelected = new Set(
       Array.from(selectedTypes).map(normalizeTypeName)
     );
 
-    return videos.filter(video =>
-      video.type_name && normalizedSelected.has(normalizeTypeName(video.type_name.trim()))
-    );
-  }, [videos, selectedTypes]);
+    return videos.filter(video => {
+      const category = getCategory(video);
 
-  // Toggle type selection - useCallback to prevent re-creation
-  const toggleType = useCallback((type: string) => {
-    // Update selected types immediately (high priority)
-    setSelectedTypes(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(type)) {
-        newSet.delete(type);
-      } else {
-        newSet.add(type);
+      if (
+        selectedTypes.size > 0 &&
+        !normalizedSelected.has(normalizeTypeName(category))
+      ) {
+        return false;
       }
-      return newSet;
+
+      if (!matches(category, filters.category)) return false;
+      if (!matches(video.region || video.area, filters.region)) return false;
+      if (!matches(video.language || video.lang, filters.language)) return false;
+      if (!matches(video.year || video.vod_year, filters.year)) return false;
+
+      return true;
+    });
+  }, [videos, selectedTypes, filters]);
+
+  const toggleType = useCallback((type: string) => {
+    setSelectedTypes(prev => {
+      const next = new Set(prev);
+      if (next.has(type)) next.delete(type);
+      else next.add(type);
+      return next;
     });
   }, []);
 
-  // Auto-cleanup: remove selected types that no longer exist in badges
+  const updateFilter = useCallback(
+    (key: keyof VideoFilters, value: string) => {
+      setFilters(prev => ({ ...prev, [key]: value }));
+    },
+    []
+  );
+
+  const resetFilters = useCallback(() => {
+    setFilters({ ...DEFAULT_FILTERS });
+    setSelectedTypes(new Set());
+  }, []);
+
   useEffect(() => {
-    const availableTypes = new Set(typeBadges.map(b => b.type));
+    const available = new Set(typeBadges.map(b => b.type));
 
     setSelectedTypes(prev => {
-      const filtered = new Set(
-        Array.from(prev).filter(type => availableTypes.has(type))
+      const next = new Set(
+        Array.from(prev).filter(type => available.has(type))
       );
-
-      // Only update if changed
-      if (filtered.size !== prev.size) {
-        return filtered;
-      }
-      return prev;
+      return next.size === prev.size ? prev : next;
     });
   }, [typeBadges]);
 
@@ -113,5 +152,9 @@ export function useTypeBadges<T extends { type_name?: string }>(videos: T[]) {
     selectedTypes,
     filteredVideos,
     toggleType,
+    filters,
+    updateFilter,
+    filterOptions,
+    resetFilters,
   };
 }
